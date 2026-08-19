@@ -1,0 +1,4 @@
+Constant[[:space:]]pore[[:space:]]pressure/** filter=lfs diff=lfs merge=lfs -text
+Event[[:space:]]maps/** filter=lfs diff=lfs merge=lfs -text
+for[[:space:]]event[[:space:]]plot/** filter=lfs diff=lfs merge=lfs -text
+event_data_SRF/** filter=lfs diff=lfs merge=lfs -text
