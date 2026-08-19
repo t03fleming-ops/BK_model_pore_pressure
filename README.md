@@ -1,6 +1,6 @@
 # VSRP-Code — Pore Pressure Effects on BK Model b-Values
 
-Numerical simulation code by Toby Fleming ([github.com/t03fleming-ops/VSRP-Code](https://github.com/t03fleming-ops/VSRP-Code)) for studying how **fluid injection (pore pressure)** changes **earthquake statistics** in a **1D Burridge–Knopoff (BK) spring-block fault model**.
+Numerical simulation code by Toby Fleming ([github.com/t03fleming-ops/BK_model_pore_pressure](https://github.com/t03fleming-ops/BK_model_pore_pressure)) for studying how **fluid injection (pore pressure)** changes **earthquake statistics** in a **1D Burridge–Knopoff (BK) spring-block fault model**.
 
 For architecture diagrams and a full logic walkthrough, see [CODE_LOGIC.md](CODE_LOGIC.md).
 
@@ -10,9 +10,12 @@ For architecture diagrams and a full logic walkthrough, see [CODE_LOGIC.md](CODE
 
 Enhanced Geothermal Systems (EGS) can induce earthquakes when fluid is injected into the subsurface. This code asks: **how does pore pressure change the Gutenberg–Richter (GR) frequency–magnitude distribution**, especially the **b-value slope?
 
-The model uses a Carlson–Langer velocity-weakening BK fault with:
-- **Constant pore pressure** (`p_ratio = pore_pressure / normal_stress`) lowering the friction threshold, or
-- **Evolving pore pressure** (Gaussian injection + 1D diffusion, advected with the moving plate)
+The model researched is the continuum Carlson–Langer velocity-weakening BK fault with constant pore pressure. Other configurations are:
+- **Discrete_vel_weakening** Discrete model using velocity weakening function.
+- **Discrete_vel_weakening_evl_pp'** Discrete model using velocity weakening function with pore pressure evolving with diffusion equation.
+- **Continuum_vel_weakening_damped_cnst_pp** Continuum limit of BK model with viscous damping and velocity weakening friction with homogenous pore pressure.
+- **Continuum_vel_weakening_damped** Continuum limit of BK model with viscous damping and velocity weakening friction.
+-**Discrete_slip_weakening** Discrete BK model using slip weakening friction.
 
 Events are detected from velocity spikes, sized by total slip, and plotted on a GR curve to extract b-values.
 
@@ -21,7 +24,7 @@ Events are detected from velocity spikes, sized by total slip, and plotted on a 
 ## Quick Start
 
 ```bash
-cd VSRP-Code-master-parallel
+cd BK_model_pore_pressure-main
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -42,16 +45,15 @@ fault = Fault(
     block_spacing=0.0625,
     p_ratio=0.6,
 )
-fault.set_initial("Random", ODE="C_L_ODE_fwrd_continuum_damped_cnst_pp")
+fault.set_initial("Random", ODE="Continuum_vel_weakening_damped_cnst_pp")
 
 dt = 0.001
-hist = fault.simulate(0, 500, dt)  # short test run
-
+hist = fault.simulate(0, 500, dt)  # short test run, hist[1] works in detect_events_from_hist for reduce memory usage.
 events = detect_events_from_hist(hist, dt=dt, threshold_factor=0)
-plot_GR(events, b_value=True, cutoff_at_peak=True)
+b = plot_GR(events, bin_size=0.33, b_value=True, b_range = (-12,2), cutoff_at_peak=True, element_size = 0.0625)
 ```
 
-Long production runs use `c_l_faultsim_rt.ipynb` with chunked saving and `joblib` parallelism.
+Long production runs use `Simulation.ipynb` with chunked saving and `joblib` parallelism.
 
 ---
 
@@ -60,8 +62,8 @@ Long production runs use `c_l_faultsim_rt.ipynb` with chunked saving and `joblib
 1. **Configure** `Fault` with physics parameters (`alpha`, `p_ratio`, `block_spacing`, etc.)
 2. **Initialize** random displacements and select an ODE formulation via `set_initial()`
 3. **Integrate** forward in time with RK4 (`simulate()`), optionally evolving pore pressure each step
-4. **Save** velocity chunks to `event_data_SRF/` (notebook) to manage disk use
-5. **Detect events** with MAD threshold + connected-component labeling
+4. **Save** velocity chunks to manage disk use
+5. **Detect events** scipy connected-component labeling
 6. **Analyze** GR curves and b-values with `plot_GR()`
 
 ---
@@ -77,73 +79,13 @@ Long production runs use `c_l_faultsim_rt.ipynb` with chunked saving and `joblib
 | Pore pressure ratio | `p_ratio` | `pore_pressure / normal_stress` | 0–0.9 |
 | Mesh spacing | `block_spacing` | Element size `a` in continuum limit | 0.0625 |
 | Time step | `dt` | RK4 step size | 0.001 |
+| Spring constant ratio| 'l' | Ratio of leaf and inter block springs | 9 |
 
 ---
 
 ## File Guide — Code Walkthrough
 
 Each section below shows a logical code group with a markdown comment immediately above explaining what it does.
-
----
-
-### `pore_pressure.py`
-
-> **Module purpose:** Solve 1D pore-pressure diffusion on a fine grid using Crank–Nicolson.
-
-> **Lines 20–22:** Build a Gaussian initial pressure profile centered at the injection site.
-
-```python
-def gaussian_press(x, injection_pressure, mu, sigma=1.0):
-    gaussian = np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-    return gaussian * injection_pressure
-```
-
-> **Lines 25–39:** Construct the sparse 1D Laplacian matrix (interior second difference, one-sided at boundaries).
-
-```python
-def build_1d_laplacian_matrix(n: int):
-    main = -2.0 * np.ones(n)
-    main[0] = -1.0
-    main[-1] = -1.0
-    off = np.ones(n - 1)
-    return sp.diags([off, main, off], offsets=[-1, 0, 1], format="csc")
-```
-
-> **Lines 59–96:** Initialize grid spacing, injection site, and starting pressure field; optionally clamp injection node.
-
-```python
-self.x = np.arange(0.0, self.n_blocks, self.res, dtype=float)
-self.inj_site = int(self.x.size // 2)
-self.Pressure = self.form(self.x, self.injection_pressure, self.x[self.inj_site], self.res)
-if self.hold_injection_pressure:
-    self.Pressure[self.inj_site] = self.injection_pressure
-```
-
-> **Lines 108–132:** Build and cache Crank–Nicolson operators `(I - dt/2 A) P^{n+1} = (I + dt/2 A) P^n`.
-
-```python
-I = sp.identity(self.x.size, format="csc")
-lhs = (I - (dt / 2.0) * self._A).tocsc()
-rhs = (I + (dt / 2.0) * self._A).tocsc()
-lhs_factor = spla.factorized(lhs)
-```
-
-> **Lines 139–149:** Advance one diffusion time step by solving the linear system.
-
-```python
-cache = self._get_crank_nicolson(dt)
-b = cache.rhs @ P
-self.Pressure = cache.lhs_factor(b)
-return self.Pressure
-```
-
-> **Lines 152–161:** Run a full time series and return `(times, pressure_history)`.
-
-```python
-for i in range(1, times.size):
-    hist[:, i] = self.crank_nicolson_step(dt)
-return times, hist
-```
 
 ---
 
@@ -283,42 +225,103 @@ for filename in os.listdir(full_directory):
     events.extend(event)
 return np.vstack(events)
 ```
-
 ---
 
-### `PlotGR.py`
+### `pore_pressure.py`
 
-> **Legacy helper:** Loads pre-saved event arrays and plots a simple GR curve for a given `alpha`.
+> **Module purpose:** Solve 1D pore-pressure diffusion on a fine grid using Crank–Nicolson.
+
+> **Lines 20–22:** Build a Gaussian initial pressure profile centered at the injection site.
 
 ```python
-event = np.load(f"event_data_SRF/alpha_change/event_sample_SRF_a:{alpha}_{n}.npy")
-mag = np.log(np.abs(event[:, 2]))
-R_mu, mu = np.histogram(mags, bins=np.arange(np.min(mags), np.max(mags), 0.1))
-ax.plot(mu, np.log(R_mu))
+def gaussian_press(x, injection_pressure, mu, sigma=1.0):
+    gaussian = np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+    return gaussian * injection_pressure
 ```
 
-Prefer `event_detection.plot_GR` for b-value fitting and richer options.
+> **Lines 25–39:** Construct the sparse 1D Laplacian matrix (interior second difference, one-sided at boundaries).
+
+```python
+def build_1d_laplacian_matrix(n: int):
+    main = -2.0 * np.ones(n)
+    main[0] = -1.0
+    main[-1] = -1.0
+    off = np.ones(n - 1)
+    return sp.diags([off, main, off], offsets=[-1, 0, 1], format="csc")
+```
+
+> **Lines 59–96:** Initialize grid spacing, injection site, and starting pressure field; optionally clamp injection node.
+
+```python
+self.x = np.arange(0.0, self.n_blocks, self.res, dtype=float)
+self.inj_site = int(self.x.size // 2)
+self.Pressure = self.form(self.x, self.injection_pressure, self.x[self.inj_site], self.res)
+if self.hold_injection_pressure:
+    self.Pressure[self.inj_site] = self.injection_pressure
+```
+
+> **Lines 108–132:** Build and cache Crank–Nicolson operators `(I - dt/2 A) P^{n+1} = (I + dt/2 A) P^n`.
+
+```python
+I = sp.identity(self.x.size, format="csc")
+lhs = (I - (dt / 2.0) * self._A).tocsc()
+rhs = (I + (dt / 2.0) * self._A).tocsc()
+lhs_factor = spla.factorized(lhs)
+```
+
+> **Lines 139–149:** Advance one diffusion time step by solving the linear system.
+
+```python
+cache = self._get_crank_nicolson(dt)
+b = cache.rhs @ P
+self.Pressure = cache.lhs_factor(b)
+return self.Pressure
+```
+
+> **Lines 152–161:** Run a full time series and return `(times, pressure_history)`.
+
+```python
+for i in range(1, times.size):
+    hist[:, i] = self.crank_nicolson_step(dt)
+return times, hist
+```
 
 ---
+### `Simulation.ipynb` 
 
-### `Notify.py`
+> **A few simulation functions using joblib's parallelisation.** Defines `run_sim()` functions that sweep pore pressure ratios and performs simulations in chunks.
 
-> **Optional utility:** Email notification when long parallel runs finish.
-
-```python
-app_password = os.environ.get("VSRP_EMAIL_PASSWORD")  # or .venv/appswrd.txt
-msg.set_content("Hello! Your simulation is finished.")
-server.login(sender_email, app_password)
-server.send_message(msg)
+> ```python
+param_dict = {
+    1: [1, 0.001, 200/0.0625, 0.02, 0, 0.0625],
+    2: [1, 0.001, 200/0.0625, 0.02, 0.6, 0.0625],
+    ...
+}
+fault = Fault(params[2], alpha=params[0], pll_spd=params[1], ...)
 ```
 
-Set `VSRP_EMAIL_PASSWORD` or create `.venv/appswrd.txt` with a Gmail app password.
+> **Chunked simulation loop:** simulate 75 time units, save velocity, detect events, delete raw chunks.
+
+```python
+for time in range(0, tn, chunk):
+    fault.state = np.load(f"event_data_SRF/.../end_state_{sim_num}.npy")
+    vel = fault.simulate(time, time + chunk, ts)[1]
+    np.save(f"event_data_SRF/.../event_sample_SRF_{time}", vel)
+    events = find_events(sim_num, t0=time, threshold_factor=0)
+```
+
+> **Parallel execution:** run multiple parameter sets concurrently.
+
+```python
+from joblib import Parallel, delayed
+Parallel(n_jobs=4)(delayed(run_sim)(i) for i in range(1, 5))
+```
 
 ---
 
 ### `c_l_faultsim_rt.ipynb`
 
-> **Main driver notebook.** Defines `run_sim()` functions that sweep pore pressure ratios.
+> **Collection of function uses, used during research.** Defines `run_sim()` functions that sweep pore pressure ratios.
 
 > **Parameter dict:** `[alpha, pll_spd, n_blocks, damping, p_ratio, block_spacing]`
 
