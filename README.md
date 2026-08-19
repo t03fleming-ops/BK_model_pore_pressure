@@ -8,7 +8,7 @@ For architecture diagrams and a full logic walkthrough, see [CODE_LOGIC.md](CODE
 
 ## Research Goal
 
-Enhanced Geothermal Systems (EGS) can induce earthquakes when fluid is injected into the subsurface. This code asks: **how does pore pressure change the Gutenberg–Richter (GR) frequency–magnitude distribution**, especially the **b-value slope?
+Enhanced Geothermal Systems (EGS) can induce earthquakes when fluid is injected into the subsurface. This code asks: **how does pore pressure change the Gutenberg–Richter (GR) frequency–magnitude distribution**, especially the **b-value slope**
 
 The model researched is the continuum Carlson–Langer velocity-weakening BK fault with constant pore pressure. Other configurations are:
 - **Discrete_vel_weakening** Discrete model using velocity weakening function.
